@@ -4,6 +4,19 @@ export default {
   content: ['./index.html', './src/**/*.{ts,tsx}'],
   theme: {
     extend: {
+      keyframes: {
+        'home-float': {
+          '0%, 100%': { transform: 'translateY(0)' },
+          '50%': { transform: 'translateY(-5px)' },
+        },
+        'home-orbit': {
+          to: { transform: 'rotate(360deg)' },
+        },
+      },
+      animation: {
+        'home-float': 'home-float 7s ease-in-out infinite',
+        'home-orbit': 'home-orbit 36s linear infinite',
+      },
       colors: {
         annie: {
           bg: '#060816',

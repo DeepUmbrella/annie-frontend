@@ -49,3 +49,44 @@ body::before {
 * {
   box-sizing: border-box;
 }
+
+/* Homepage-only layered borders and cursor spotlight; colors inherit Annie tokens. */
+.home-capability {
+  background:
+    linear-gradient(135deg, theme('colors.annie.panel'), theme('colors.annie.bg')) padding-box,
+    linear-gradient(145deg, currentColor, theme('colors.annie.border') 46%, theme('colors.annie.border')) border-box;
+}
+
+.home-capability::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background: radial-gradient(260px circle at var(--mx, 22%) var(--my, 0%), currentColor, transparent 75%);
+  opacity: 0.08;
+  transition: opacity 300ms;
+}
+
+.home-capability:hover::before,
+.home-capability:focus-visible::before {
+  opacity: 0.18;
+}
+
+.home-page a:focus-visible {
+  outline: 2px solid theme('colors.annie.cyan');
+  outline-offset: 5px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .home-page *,
+  .home-page *::before,
+  .home-page *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+
+  .home-page a:hover {
+    transform: none;
+  }
+}
