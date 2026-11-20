@@ -1,5 +1,8 @@
+ARG NODE_IMAGE=docker.m.daocloud.io/library/node:22-alpine
+ARG NGINX_IMAGE=docker.m.daocloud.io/library/nginx:alpine
+
 # Build stage
-FROM docker.m.daocloud.io/library/node:22-alpine AS builder
+FROM ${NODE_IMAGE} AS builder
 
 WORKDIR /app
 
@@ -19,7 +22,7 @@ RUN npm run build
 
 
 # Production stage
-FROM docker.m.daocloud.io/library/nginx:alpine AS runner
+FROM ${NGINX_IMAGE} AS runner
 
 RUN apk add --no-cache curl
 
