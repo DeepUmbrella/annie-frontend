@@ -1,0 +1,115 @@
+name: Deploy frontend to ECS
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: 'GHCR digest (sha256:...) or rollback'
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: frontend-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.repository == 'DeepUmbrella/annie-frontend' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 18
+    environment: production
+    permissions:
+      id-token: write
+    env:
+      RELEASE: ${{ inputs.release }}
+    steps:
+      - name: Validate release input and configuration
+        shell: bash
+        env:
+          ECS_REGION_ID: ${{ vars.ALIYUN_ECS_REGION_ID }}
+          ECS_INSTANCE_ID: ${{ vars.ALIYUN_ECS_INSTANCE_ID }}
+          ECS_COMMAND_ID: ${{ vars.ALIYUN_FRONTEND_COMMAND_ID }}
+          OIDC_PROVIDER_ARN: ${{ vars.ALIYUN_OIDC_PROVIDER_ARN }}
+          DEPLOY_ROLE_ARN: ${{ vars.ALIYUN_FRONTEND_ROLE_ARN }}
+        run: |
+          if [[ "$RELEASE" != rollback && ! "$RELEASE" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+            echo 'Enter a sha256 digest from the image build summary, or rollback.' >&2
+            exit 1
+          fi
+          : "${ECS_REGION_ID:?Set ALIYUN_ECS_REGION_ID in the production environment}"
+          : "${ECS_INSTANCE_ID:?Set ALIYUN_ECS_INSTANCE_ID in the production environment}"
+          : "${ECS_COMMAND_ID:?Set ALIYUN_FRONTEND_COMMAND_ID in the production environment}"
+          : "${OIDC_PROVIDER_ARN:?Set ALIYUN_OIDC_PROVIDER_ARN in the production environment}"
+          : "${DEPLOY_ROLE_ARN:?Set ALIYUN_FRONTEND_ROLE_ARN in the production environment}"
+
+      - name: Install Alibaba Cloud CLI
+        shell: bash
+        run: |
+          cli_dir=$(mktemp -d "$RUNNER_TEMP/aliyun.XXXXXXXX")
+          archive="$cli_dir/aliyun-cli.tgz"
+          curl --fail --silent --show-error --location --retry 3 --max-time 120 \
+            --output "$archive" \
+            https://github.com/aliyun/aliyun-cli/releases/download/v3.5.4/aliyun-cli-linux-3.5.4-amd64.tgz
+          printf '%s  %s\n' e1eefcbbe9d772d61f770d4af8595e7297e081a0348b096765d2c41e581c3e72 "$archive" \
+            | sha256sum --check --status
+          tar -xzf "$archive" -C "$cli_dir" aliyun
+          printf '%s\n' "$cli_dir" >> "$GITHUB_PATH"
+
+      - name: Get temporary Alibaba Cloud credentials
+        uses: aliyun/configure-aliyun-credentials-action@1e5248c8d5d93a8781ac344a68e19a43341e79e6 # v1.1.0
+        with:
+          oidc-provider-arn: ${{ vars.ALIYUN_OIDC_PROVIDER_ARN }}
+          role-to-assume: ${{ vars.ALIYUN_FRONTEND_ROLE_ARN }}
+          audience: sts.aliyuncs.com
+          role-session-name: annie-frontend-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Run and monitor the frontend release
+        shell: bash
+        env:
+          ECS_REGION_ID: ${{ vars.ALIYUN_ECS_REGION_ID }}
+          ECS_INSTANCE_ID: ${{ vars.ALIYUN_ECS_INSTANCE_ID }}
+          ECS_COMMAND_ID: ${{ vars.ALIYUN_FRONTEND_COMMAND_ID }}
+        run: |
+          parameters=$(jq -nc --arg release "$RELEASE" '{release: $release}')
+          response=$(aliyun ecs InvokeCommand \
+            --region "$ECS_REGION_ID" --RegionId "$ECS_REGION_ID" \
+            --InstanceId.1 "$ECS_INSTANCE_ID" --CommandId "$ECS_COMMAND_ID" \
+            --Parameters "$parameters" --RepeatMode Once --Username annie-release \
+            --WorkingDir / --Timeout 600 --ClientToken "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT")
+          invoke_id=$(jq -er '.InvokeId | select(test("^t-[a-zA-Z0-9]+$"))' <<< "$response")
+          printf 'ECS invocation: %s\n' "$invoke_id"
+          printf '### ECS frontend release\n\n- Release: `%s`\n- Invocation: `%s`\n' \
+            "$RELEASE" "$invoke_id" >> "$GITHUB_STEP_SUMMARY"
+
+          deadline=$((SECONDS + 720))
+          while (( SECONDS < deadline )); do
+            if response=$(timeout 20s aliyun ecs DescribeInvocationResults \
+              --region "$ECS_REGION_ID" --RegionId "$ECS_REGION_ID" \
+              --InstanceId "$ECS_INSTANCE_ID" --CommandId "$ECS_COMMAND_ID" \
+              --InvokeId "$invoke_id" --ContentEncoding PlainText); then
+              result=$(jq -c --arg instance "$ECS_INSTANCE_ID" \
+                '[.Invocation.InvocationResults.InvocationResult[]? | select(.InstanceId == $instance)][0] // {}' \
+                <<< "$response")
+              status=$(jq -r '.InvocationStatus // empty' <<< "$result")
+              case "$status" in
+                ''|Pending|Running|Stopping) ;;
+                *)
+                  jq -c '{InvocationStatus, ExitCode, ErrorCode, ErrorInfo, Dropped, Output}' <<< "$result"
+                  if [[ "$status" == Success ]] && jq -e '.ExitCode == 0' <<< "$result" >/dev/null; then
+                    printf -- '- Result: success\n' >> "$GITHUB_STEP_SUMMARY"
+                    exit 0
+                  fi
+                  printf 'ECS frontend release failed (invocation %s).\n' "$invoke_id" >&2
+                  printf -- '- Result: failed\n' >> "$GITHUB_STEP_SUMMARY"
+                  exit 1
+                  ;;
+              esac
+            fi
+            sleep 5
+          done
+
+          printf 'Timed out waiting for ECS invocation %s. Check its status before retrying.\n' "$invoke_id" >&2
+          printf -- '- Result: timed out waiting for ECS\n' >> "$GITHUB_STEP_SUMMARY"
+          exit 1
